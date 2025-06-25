@@ -7,12 +7,16 @@ import os
 import argparse
 import numpy as np
 from mss import mss
+import time
+from collections import deque
 
 # Constantes de rutas
 VIDEO_PATH = 'video_camaras.mp4'
 STOLEN_CSV = 'patentes_robadas.csv'
 ALERTS_CSV = 'alertas_detectadas.csv'
 CAPTURES_DIR = 'capturas_alertas'
+# Duración en segundos del video que se guarda al detectar una patente robada
+CLIP_SECONDS = 30
 # Ruta del modelo entrenado para detectar patentes
 MODEL_PATH = 'modelo_yolo.pt'  # Reemplazar por el peso entrenado para detectar patentes
 
@@ -73,6 +77,17 @@ def save_alert(frame, plate_text: str):
         f.write(f'{date_str},{time_str},{plate_text}\n')
 
 
+def start_clip_writer(frame, plate_text: str, fps: int):
+    """Crea un writer para guardar un clip de video."""
+    now = datetime.now()
+    ts = now.strftime('%Y-%m-%d_%H-%M-%S')
+    filename = f"{CAPTURES_DIR}/{plate_text}_{ts}.mp4"
+    height, width = frame.shape[:2]
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(filename, fourcc, fps, (width, height))
+    return writer
+
+
 def draw_label(frame, text, bbox, color=(0, 255, 0)):
     """Dibuja el rectángulo y la etiqueta en la imagen."""
     x1, y1, x2, y2 = map(int, bbox)
@@ -100,10 +115,21 @@ def main():
         cap = None
         sct = mss()
         monitor = sct.monitors[1]
+        fps = 20
     else:
         cap = cv2.VideoCapture(args.video)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 1:
+            fps = 20
     frame_id = 0
     frame_skip = max(1, args.frame_skip)
+
+    detection_enabled = False
+    recording = False
+    record_end = 0
+    writer = None
+
+    print("Presiona 'O' para iniciar detección y 'P' para salir")
 
     while True:
         if args.screen:
@@ -113,8 +139,26 @@ def main():
             ret, frame = cap.read()
             if not ret:
                 break
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('o'):
+            detection_enabled = True
+        elif key == ord('p'):
+            break
+
+        if not detection_enabled:
+            cv2.imshow('Video', frame)
+            continue
+
         if frame_id % frame_skip != 0:
             frame_id += 1
+            if recording and writer is not None:
+                writer.write(frame)
+                if time.time() >= record_end:
+                    writer.release()
+                    writer = None
+                    recording = False
+            cv2.imshow('Video', frame)
             continue
 
         try:
@@ -143,11 +187,20 @@ def main():
                 if plate_text in stolen_plates:
                     print(f"ALERTA: Patente robada detectada {plate_text}")
                     save_alert(frame, plate_text)
+                    if not recording:
+                        writer = start_clip_writer(frame, plate_text, int(fps))
+                        record_end = time.time() + CLIP_SECONDS
+                        recording = True
+
+        if recording and writer is not None:
+            writer.write(frame)
+            if time.time() >= record_end:
+                writer.release()
+                writer = None
+                recording = False
 
         cv2.imshow('Video', frame)
         frame_id += 1
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
 
     if cap is not None:
         cap.release()
@@ -163,3 +216,5 @@ if __name__ == '__main__':
 #     python detector_patentes.py --video mi_video.mp4 --stolen mis_patentes.csv
 # Para capturar la pantalla en tiempo real:
 #     python detector_patentes.py --screen
+# Durante la ejecución presiona la tecla 'O' para iniciar la detección
+# y la tecla 'P' para finalizar.
